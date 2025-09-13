@@ -75,6 +75,12 @@ rm -rf build-visionos-sim
 rm -rf build-tvos-sim
 rm -rf build-tvos-device
 
+# Location of the prebuilt GGMLMetal.xcframework (defaults to ../out)
+REPO_ROOT="$(cd .. && pwd)"
+GGMLMETAL_XCFRAMEWORK=${GGMLMETAL_XCFRAMEWORK:-"${REPO_ROOT}/out/GGMLMetal.xcframework"}
+GGMLMETAL_SLICE_SIM="${GGMLMETAL_XCFRAMEWORK}/ios-arm64_x86_64-simulator"
+GGMLMETAL_SLICE_DEV="${GGMLMETAL_XCFRAMEWORK}/ios-arm64"
+
 # Setup the xcframework build directory structure
 setup_framework_structure() {
     local build_dir=$1
@@ -113,32 +119,13 @@ setup_framework_structure() {
         local module_path=${build_dir}/framework/${framework_name}.framework/Modules/
     fi
 
-    # Copy all required headers (common for all platforms)
+    # Copy only whisper public headers (do not export ggml from this wrapper)
     cp include/whisper.h           ${header_path}
-    cp ggml/include/ggml.h         ${header_path}
-    cp ggml/include/ggml-alloc.h   ${header_path}
-    cp ggml/include/ggml-backend.h ${header_path}
-    cp ggml/include/ggml-metal.h   ${header_path}
-    cp ggml/include/ggml-cpu.h     ${header_path}
-    cp ggml/include/ggml-blas.h    ${header_path}
-    cp ggml/include/gguf.h         ${header_path}
 
     # Create module map (common for all platforms)
     cat > ${module_path}module.modulemap << EOF
 framework module whisper {
     header "whisper.h"
-    header "ggml.h"
-    header "ggml-alloc.h"
-    header "ggml-backend.h"
-    header "ggml-metal.h"
-    header "ggml-cpu.h"
-    header "ggml-blas.h"
-    header "gguf.h"
-
-    link "c++"
-    link framework "Accelerate"
-    link framework "Metal"
-    link framework "Foundation"
 
     export *
 }
@@ -243,14 +230,23 @@ combine_static_libraries() {
         output_lib="${build_dir}/framework/${framework_name}.framework/${framework_name}"
     fi
 
-    local libs=(
-        "${base_dir}/${build_dir}/src/${release_dir}/libwhisper.a"
-        "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml.a"
-        "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-base.a"
-        "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-cpu.a"
-        "${base_dir}/${build_dir}/ggml/src/ggml-metal/${release_dir}/libggml-metal.a"
-        "${base_dir}/${build_dir}/ggml/src/ggml-blas/${release_dir}/libggml-blas.a"
-    )
+    local libs=()
+    if [[ "$platform" == "ios" ]]; then
+        # Do not embed ggml; link external GGMLMetal framework at dynamic link step
+        libs=(
+            "${base_dir}/${build_dir}/src/${release_dir}/libwhisper.a"
+        )
+    else
+        # Non‑iOS platforms keep previous behavior
+        libs=(
+            "${base_dir}/${build_dir}/src/${release_dir}/libwhisper.a"
+            "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml.a"
+            "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-base.a"
+            "${base_dir}/${build_dir}/ggml/src/${release_dir}/libggml-cpu.a"
+            "${base_dir}/${build_dir}/ggml/src/ggml-metal/${release_dir}/libggml-metal.a"
+            "${base_dir}/${build_dir}/ggml/src/ggml-blas/${release_dir}/libggml-blas.a"
+        )
+    fi
     if [[ "$platform" == "macos" || "$platform" == "ios" ]]; then
         echo "Adding libwhisper.coreml library to the build."
         libs+=(
@@ -339,14 +335,32 @@ combine_static_libraries() {
 
     # Create dynamic library
     echo "Creating dynamic library for ${platform}."
-    xcrun -sdk $sdk clang++ -dynamiclib \
-        -isysroot $(xcrun --sdk $sdk --show-sdk-path) \
-        $arch_flags \
-        $min_version_flag \
-        -Wl,-force_load,"${temp_dir}/combined.a" \
-        $frameworks \
-        -install_name "$install_name" \
-        -o "${base_dir}/${output_lib}"
+    if [[ "$platform" == "ios" ]]; then
+        # Link to external GGMLMetal framework and set rpath for app embedding
+        local slice_dir="$GGMLMETAL_SLICE_DEV"
+        if [[ "$is_simulator" == "true" ]]; then
+            slice_dir="$GGMLMETAL_SLICE_SIM"
+        fi
+        xcrun -sdk $sdk clang++ -dynamiclib \
+            -isysroot $(xcrun --sdk $sdk --show-sdk-path) \
+            $arch_flags \
+            $min_version_flag \
+            -Wl,-force_load,"${temp_dir}/combined.a" \
+            -F "$slice_dir" -framework GGMLMetal \
+            $frameworks \
+            -Xlinker -rpath -Xlinker @executable_path/Frameworks \
+            -install_name "$install_name" \
+            -o "${base_dir}/${output_lib}"
+    else
+        xcrun -sdk $sdk clang++ -dynamiclib \
+            -isysroot $(xcrun --sdk $sdk --show-sdk-path) \
+            $arch_flags \
+            $min_version_flag \
+            -Wl,-force_load,"${temp_dir}/combined.a" \
+            $frameworks \
+            -install_name "$install_name" \
+            -o "${base_dir}/${output_lib}"
+    fi
 
     # Platform-specific post-processing for device builds
     if [[ "$is_simulator" == "false" ]]; then
@@ -431,6 +445,8 @@ cmake -B build-ios-sim -G Xcode \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=iphonesimulator \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
+    -DWHISPER_USE_GGMLMETAL_FRAMEWORK=ON \
+    -DGGMLMETAL_FRAMEWORK_DIR="${GGMLMETAL_SLICE_SIM}" \
     -DWHISPER_COREML="ON" \
     -DWHISPER_COREML_ALLOW_FALLBACK="ON" \
     -S .
@@ -445,6 +461,8 @@ cmake -B build-ios-device -G Xcode \
     -DCMAKE_XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS=iphoneos \
     -DCMAKE_C_FLAGS="${COMMON_C_FLAGS}" \
     -DCMAKE_CXX_FLAGS="${COMMON_CXX_FLAGS}" \
+    -DWHISPER_USE_GGMLMETAL_FRAMEWORK=ON \
+    -DGGMLMETAL_FRAMEWORK_DIR="${GGMLMETAL_SLICE_DEV}" \
     -DWHISPER_COREML="ON" \
     -DWHISPER_COREML_ALLOW_FALLBACK="ON" \
     -S .

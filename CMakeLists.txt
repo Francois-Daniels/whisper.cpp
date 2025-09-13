@@ -55,6 +55,10 @@ endif()
 
 option(BUILD_SHARED_LIBS "build shared libraries" ${BUILD_SHARED_LIBS_DEFAULT})
 
+# Use external GGMLMetal.framework instead of compiling ggml (iOS builds)
+option(WHISPER_USE_GGMLMETAL_FRAMEWORK "whisper: use external GGMLMetal.framework (imports ggml)" OFF)
+set(GGMLMETAL_FRAMEWORK_DIR "" CACHE PATH "Path to GGMLMetal.framework slice (e.g., .../GGMLMetal.xcframework/ios-arm64)")
+
 #
 # option list
 #
@@ -128,7 +132,16 @@ endif()
 # build the library
 #
 
-if (NOT TARGET ggml)
+if (WHISPER_USE_GGMLMETAL_FRAMEWORK AND GGMLMETAL_FRAMEWORK_DIR)
+    # Import ggml as a prebuilt Apple framework so whisper links dynamically
+    add_library(ggml SHARED IMPORTED GLOBAL)
+    set_target_properties(ggml PROPERTIES
+        FRAMEWORK TRUE
+        IMPORTED_LOCATION "${GGMLMETAL_FRAMEWORK_DIR}/GGMLMetal.framework/GGMLMetal"
+        IMPORTED_SONAME "@rpath/GGMLMetal.framework/GGMLMetal"
+        INTERFACE_INCLUDE_DIRECTORIES "${GGMLMETAL_FRAMEWORK_DIR}/GGMLMetal.framework/Headers"
+    )
+elseif (NOT TARGET ggml)
     if (WHISPER_USE_SYSTEM_GGML)
         find_package(ggml REQUIRED)
         if (NOT ggml_FOUND)
