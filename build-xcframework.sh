@@ -119,13 +119,37 @@ setup_framework_structure() {
         local module_path=${build_dir}/framework/${framework_name}.framework/Modules/
     fi
 
-    # Copy only whisper public headers (do not export ggml from this wrapper)
+    # Copy only whisper public headers
     cp include/whisper.h           ${header_path}
+
+    # Make ggml headers available locally so that #include "ggml.h" in whisper.h resolves
+    # Use headers from the device slice (identical across slices)
+    if [[ -d "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers" ]]; then
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml.h"              ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml-alloc.h"        ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml-backend.h"      ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml-metal.h"        ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml-cpu.h"          ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml-blas.h"         ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml-opt.h"          ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/ggml-cpp.h"          ${header_path} || true
+        cp "${GGMLMETAL_SLICE_DEV}/GGMLMetal.framework/Headers/gguf.h"              ${header_path} || true
+    fi
 
     # Create module map (common for all platforms)
     cat > ${module_path}module.modulemap << EOF
 framework module whisper {
     header "whisper.h"
+    // allow textual inclusion of ggml headers referenced by whisper.h
+    textual header "ggml.h"
+    textual header "ggml-alloc.h"
+    textual header "ggml-backend.h"
+    textual header "ggml-metal.h"
+    textual header "ggml-cpu.h"
+    textual header "ggml-blas.h"
+    textual header "ggml-opt.h"
+    textual header "ggml-cpp.h"
+    textual header "gguf.h"
 
     export *
 }
